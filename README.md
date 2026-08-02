@@ -43,9 +43,10 @@ packages `audio.primary.floral` and selects it with:
 ro.hardware.audio.primary=floral
 ```
 
-The redroid product's existing 48 kHz primary policy remains the single owner
-of the installed audio policy files. The previous second module installing the
-same `primary_audio_policy_configuration.xml` was removed.
+The Floral product fragment owns the complete installed policy file set. It
+copies the shared platform policy files together with Floral's output-only
+48 kHz primary policy, so Make has one owner for each vendor path and the
+standard `audio_policy_configuration.xml` include relationship remains intact.
 
 The internal FMQ record is documented in [PROTOCOL.md](PROTOCOL.md). The FSA1
 host protocol belongs to `packages_services_FloralDevice/PROTOCOL.md`.
@@ -94,8 +95,10 @@ FloralDevice 不存在或处理落后时，AudioFlinger 时钟继续推进，超
 ro.hardware.audio.primary=floral
 ```
 
-redroid 产品已有的 48 kHz primary policy 继续作为已安装音频策略文件的唯一
-所有者。此前第二个同名安装 `primary_audio_policy_configuration.xml` 的模块已移除。
+Floral 产品片段统一负责已安装的完整策略文件集合。它将平台共享策略文件与
+Floral 仅输出的 48 kHz primary policy 一并复制，使每个 vendor 目标路径只有
+一个 Make 所有者，同时保持标准 `audio_policy_configuration.xml` 引用关系
+不变。
 
 容器内部 FMQ 记录见 [PROTOCOL.md](PROTOCOL.md)；FSA1 宿主协议归
 `packages_services_FloralDevice/PROTOCOL.md` 管理。
