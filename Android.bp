@@ -1,0 +1,82 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+cc_library_static {
+    name: "libfloral_audio_core",
+    vendor_available: true,
+    srcs: [
+        "src/AudioPacketQueue.cpp",
+        "src/AudioPcmPublisher.cpp",
+    ],
+    export_include_dirs: ["include"],
+    whole_static_libs: ["libfloral_device_audio_pcm"],
+    shared_libs: [
+        "android.hardware.common-V2-ndk_platform",
+        "android.hardware.common.fmq-V1-ndk_platform",
+        "floral.device.audio-V1-ndk_platform",
+        "libbase",
+        "libbinder_ndk",
+        "libcutils",
+        "libfmq",
+        "liblog",
+        "libutils",
+    ],
+    cflags: [
+        "-Wall",
+        "-Werror",
+        "-Wextra",
+    ],
+}
+
+cc_library_shared {
+    name: "audio.primary.floral",
+    relative_install_path: "hw",
+    vendor: true,
+    proprietary: true,
+    srcs: ["src/AudioHal.cpp"],
+    header_libs: ["libhardware_headers"],
+    static_libs: ["libfloral_audio_core"],
+    shared_libs: [
+        "android.hardware.common-V2-ndk_platform",
+        "android.hardware.common.fmq-V1-ndk_platform",
+        "floral.device.audio-V1-ndk_platform",
+        "libbase",
+        "libbinder_ndk",
+        "libcutils",
+        "libfmq",
+        "liblog",
+        "libutils",
+    ],
+    cflags: [
+        "-Wall",
+        "-Werror",
+        "-Wextra",
+    ],
+}
+
+cc_test {
+    name: "floral_audio_tests",
+    vendor: true,
+    srcs: [
+        "tests/AudioPacketQueueTest.cpp",
+    ],
+    static_libs: ["libfloral_audio_core"],
+    shared_libs: [
+        "android.hardware.common-V2-ndk_platform",
+        "android.hardware.common.fmq-V1-ndk_platform",
+        "floral.device.audio-V1-ndk_platform",
+        "libbase",
+        "libbinder_ndk",
+        "libcutils",
+        "libfmq",
+        "liblog",
+        "libutils",
+    ],
+    test_suites: ["device-tests"],
+    cflags: [
+        "-Wall",
+        "-Werror",
+        "-Wextra",
+    ],
+}
