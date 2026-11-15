@@ -14,10 +14,10 @@ HAL 不编码音频，也不打开宿主 Socket。Opus 编码、动态码率、F
 
 - 提供传统 `audio.primary.floral` 模块，由 Android 12
   `android.hardware.audio@7.0-impl` 包装。
-- 仅支持输出；麦克风输入明确不属于当前范围。
-- 固定 48 kHz、双声道、PCM S16_LE。
+- 扬声器输出与虚拟内置麦克风输入可同时工作。
+- 固定 48 kHz、PCM S16_LE，输出双声道、输入单声道。
 - 每块 240 帧，即 5 毫秒音频。
-- HAL 内四块有界队列，后接容量为八条记录的同步 FMQ。
+- 输出路径为 HAL 内四块有界队列，后接容量为八条记录的同步 FMQ。
 - 出现背压时丢弃最旧的本地 PCM 块，并标记不连续。
 - 保留单调采样位置和首采样点 `CLOCK_MONOTONIC` 显示时间戳。
 
@@ -27,6 +27,13 @@ HAL 不编码音频，也不打开宿主 Socket。Opus 编码、动态码率、F
 
 FloralDevice 不存在或处理落后时，AudioFlinger 时钟继续推进，超出边界的音频块
 会被丢弃。下一条成功发布的记录携带不连续标志，使 Opus 会话重置预测状态。
+
+麦克风 PCM 从 `/ipc/floral_stream/mic.sock` 进入 FloralDevice，再通过独立的
+`IAudioPcmSource/default` 会话，以单声道 FMI1 记录送入四块容量的 FMQ。
+HAL 接收线程维护四块本地队列，每次开始录音都获取新的 FMQ。输入读取丢弃
+超过 40 ms 的旧记录，欠载时按采样节拍补静音，并在静音切换和 standby 时
+清理缓冲。输入协议见
+`packages/services/FloralDevice/docs/protocols/FMI1.md`。
 
 ## 产品集成
 
@@ -38,7 +45,7 @@ ro.hardware.audio.primary=floral
 ```
 
 Floral 产品片段统一负责已安装的完整策略文件集合。它将平台共享策略文件与
-Floral 仅输出的 48 kHz primary policy 一并复制，使每个 vendor 目标路径只有
+Floral 扬声器与麦克风 primary policy 一并复制，使每个 vendor 目标路径只有
 一个 Make 所有者，同时保持标准 `audio_policy_configuration.xml` 引用关系
 不变。
 
@@ -50,3 +57,6 @@ Floral 仅输出的 48 kHz primary policy 一并复制，使每个 vendor 目标
 HAL 以物理扬声器相同的角色接收 AudioFlinger 最终主混音，不使用
 MediaProjection、AudioPlaybackCapture 或录音 API。当前能力契约不承诺 DRM
 及受保护音频行为，必须单独验证。
+
+麦克风录音遵循标准 Android 录音权限、AppOps 和音频策略。宿主负责提供 PCM
+音源；HAL 不采集宿主麦克风，也不承诺硬件预处理或真实硬件采集时间戳。

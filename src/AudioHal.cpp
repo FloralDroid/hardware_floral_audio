@@ -18,8 +18,10 @@
 
 #include "floral/audio/AudioPacketQueue.h"
 #include "floral/audio/AudioPcmPublisher.h"
+#include "floral/audio/AudioPcmReceiver.h"
 
 #include <aidl/floral/device/audio/IAudioPcmSink.h>
+#include <aidl/floral/device/audio/IAudioPcmSource.h>
 
 #include <errno.h>
 #include <hardware/audio.h>
@@ -34,6 +36,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -72,6 +75,8 @@ void SleepUntil(int64_t deadlineNs) {
 }
 
 struct FloralStreamOut;
+struct FloralStreamIn;
+namespace input_pcm = floral::device::audio;
 
 floral::audio::AudioPcmPublisherConfig MakeAudioPcmPublisherConfig() {
     floral::audio::AudioPcmPublisherConfig config;
@@ -84,7 +89,22 @@ struct FloralAudioDevice {
     audio_hw_device device{};
     mutable std::mutex mutex;
     FloralStreamOut* output = nullptr;
+    FloralStreamIn* input = nullptr;
     bool mic_muted = false;
+};
+
+struct FloralStreamIn {
+    FloralStreamIn()
+        : receiver(std::string(aidl::floral::device::audio::IAudioPcmSource::descriptor) +
+                   "/default") {}
+
+    audio_stream_in stream{};
+    mutable std::mutex mutex;
+    floral::audio::AudioPcmReceiver receiver;
+    bool standby = true;
+    int64_t frames_read = 0;
+    int64_t capture_time_ns = 0;
+    int64_t next_read_deadline_ns = 0;
 };
 
 struct FloralStreamOut {
@@ -311,6 +331,123 @@ int OutputGetPresentationPosition(const audio_stream_out* stream, uint64_t* fram
     return 0;
 }
 
+FloralStreamIn* ToInput(const audio_stream* stream) {
+    return reinterpret_cast<FloralStreamIn*>(const_cast<audio_stream*>(stream));
+}
+
+uint32_t InputGetSampleRate(const audio_stream*) {
+    return input_pcm::kAudioInputSampleRate;
+}
+
+int InputSetSampleRate(audio_stream*, uint32_t rate) {
+    return rate == input_pcm::kAudioInputSampleRate ? 0 : -ENOSYS;
+}
+
+size_t InputGetBufferSize(const audio_stream*) {
+    return input_pcm::kAudioInputPayloadSize;
+}
+
+audio_channel_mask_t InputGetChannels(const audio_stream*) {
+    return AUDIO_CHANNEL_IN_MONO;
+}
+
+audio_format_t InputGetFormat(const audio_stream*) {
+    return AUDIO_FORMAT_PCM_16_BIT;
+}
+
+int InputSetFormat(audio_stream*, audio_format_t format) {
+    return format == AUDIO_FORMAT_PCM_16_BIT ? 0 : -ENOSYS;
+}
+
+audio_devices_t InputGetDevice(const audio_stream*) {
+    return AUDIO_DEVICE_IN_BUILTIN_MIC;
+}
+
+int InputStandby(audio_stream* stream) {
+    auto* input = ToInput(stream);
+    std::lock_guard lock(input->mutex);
+    input->standby = true;
+    input->receiver.EndStream();
+    return 0;
+}
+
+int InputDump(const audio_stream* stream, int fd) {
+    const auto stats = ToInput(stream)->receiver.GetStats();
+    dprintf(fd,
+            "Floral microphone input: PCM S16_LE, 48000 Hz, mono\n"
+            "  received packets: %llu\n"
+            "  dropped frames: %llu\n"
+            "  underrun frames: %llu\n"
+            "  connection failures: %llu\n"
+            "  malformed records: %llu\n",
+            static_cast<unsigned long long>(stats.received_packets),
+            static_cast<unsigned long long>(stats.dropped_frames),
+            static_cast<unsigned long long>(stats.underrun_frames),
+            static_cast<unsigned long long>(stats.connection_failures),
+            static_cast<unsigned long long>(stats.malformed_records));
+    return 0;
+}
+
+int InputSetParameters(audio_stream*, const char*) {
+    return 0;
+}
+
+char* InputGetParameters(const audio_stream*, const char*) {
+    return strdup("");
+}
+
+int InputAddAudioEffect(const audio_stream*, effect_handle_t) {
+    return -ENOSYS;
+}
+
+int InputRemoveAudioEffect(const audio_stream*, effect_handle_t) {
+    return -ENOSYS;
+}
+
+int InputSetGain(audio_stream_in*, float) {
+    return -ENOSYS;
+}
+
+ssize_t InputRead(audio_stream_in* stream, void* buffer, size_t bytes) {
+    if (buffer == nullptr || bytes == 0 || bytes % sizeof(int16_t) != 0 ||
+        bytes > static_cast<size_t>(std::numeric_limits<ssize_t>::max())) {
+        return -EINVAL;
+    }
+    auto* input = reinterpret_cast<FloralStreamIn*>(stream);
+    const size_t frames = bytes / sizeof(int16_t);
+    std::lock_guard lock(input->mutex);
+    const int64_t nowNs = MonotonicNanoseconds();
+    if (input->standby || nowNs > input->next_read_deadline_ns + kUnderrunResetThresholdNs) {
+        input->receiver.BeginStream();
+        input->standby = false;
+        input->next_read_deadline_ns = nowNs;
+    }
+    input->next_read_deadline_ns =
+            std::max(input->next_read_deadline_ns, nowNs) + FramesToNanoseconds(frames);
+    input->receiver.Read(static_cast<int16_t*>(buffer), frames, input->next_read_deadline_ns);
+    input->frames_read += frames;
+    input->capture_time_ns = MonotonicNanoseconds();
+    return bytes;
+}
+
+uint32_t InputGetFramesLost(audio_stream_in* stream) {
+    return reinterpret_cast<FloralStreamIn*>(stream)->receiver.TakeLostFrames();
+}
+
+int InputGetCapturePosition(const audio_stream_in* stream, int64_t* frames, int64_t* time) {
+    if (frames == nullptr || time == nullptr) {
+        return -EINVAL;
+    }
+    const auto* input = reinterpret_cast<const FloralStreamIn*>(stream);
+    std::lock_guard lock(input->mutex);
+    if (input->capture_time_ns == 0) {
+        return -ENOSYS;
+    }
+    *frames = input->frames_read;
+    *time = input->capture_time_ns;
+    return 0;
+}
+
 int DeviceInitCheck(const audio_hw_device* device) {
     (void)device;
     return 0;
@@ -356,6 +493,9 @@ int DeviceSetMicMute(audio_hw_device* device, bool state) {
     auto* floralDevice = reinterpret_cast<FloralAudioDevice*>(device);
     std::lock_guard lock(floralDevice->mutex);
     floralDevice->mic_muted = state;
+    if (floralDevice->input != nullptr) {
+        floralDevice->input->receiver.SetMuted(state);
+    }
     return 0;
 }
 
@@ -383,8 +523,12 @@ char* DeviceGetParameters(const audio_hw_device* device, const char* keys) {
 
 size_t DeviceGetInputBufferSize(const audio_hw_device* device, const audio_config* config) {
     (void)device;
-    (void)config;
-    return 0;
+    if (config == nullptr || config->sample_rate != input_pcm::kAudioInputSampleRate ||
+        config->channel_mask != AUDIO_CHANNEL_IN_MONO ||
+        config->format != AUDIO_FORMAT_PCM_16_BIT) {
+        return 0;
+    }
+    return input_pcm::kAudioInputPayloadSize;
 }
 
 int DeviceOpenOutputStream(audio_hw_device* device, audio_io_handle_t handle,
@@ -470,22 +614,69 @@ void DeviceCloseOutputStream(audio_hw_device* device, audio_stream_out* stream) 
 int DeviceOpenInputStream(audio_hw_device* device, audio_io_handle_t handle,
                           audio_devices_t devices, audio_config* config, audio_stream_in** streamIn,
                           audio_input_flags_t flags, const char* address, audio_source_t source) {
-    (void)device;
     (void)handle;
-    (void)devices;
-    (void)config;
-    (void)flags;
     (void)address;
     (void)source;
-    if (streamIn != nullptr) {
-        *streamIn = nullptr;
+    if (streamIn == nullptr || config == nullptr) {
+        return -EINVAL;
     }
-    return -ENOSYS;
+    *streamIn = nullptr;
+    const bool supported =
+            (config->sample_rate == 0 || config->sample_rate == input_pcm::kAudioInputSampleRate) &&
+            (config->channel_mask == AUDIO_CHANNEL_NONE ||
+             config->channel_mask == AUDIO_CHANNEL_IN_MONO) &&
+            (config->format == AUDIO_FORMAT_DEFAULT || config->format == AUDIO_FORMAT_PCM_16_BIT);
+    config->sample_rate = input_pcm::kAudioInputSampleRate;
+    config->channel_mask = AUDIO_CHANNEL_IN_MONO;
+    config->format = AUDIO_FORMAT_PCM_16_BIT;
+    if (!supported || devices != AUDIO_DEVICE_IN_BUILTIN_MIC || flags != AUDIO_INPUT_FLAG_NONE) {
+        return -EINVAL;
+    }
+
+    auto* floralDevice = reinterpret_cast<FloralAudioDevice*>(device);
+    std::lock_guard lock(floralDevice->mutex);
+    if (floralDevice->input != nullptr) {
+        return -EBUSY;
+    }
+    std::unique_ptr<FloralStreamIn> input(new (std::nothrow) FloralStreamIn());
+    if (input == nullptr) {
+        return -ENOMEM;
+    }
+    input->receiver.SetMuted(floralDevice->mic_muted);
+    input->stream.common.get_sample_rate = InputGetSampleRate;
+    input->stream.common.set_sample_rate = InputSetSampleRate;
+    input->stream.common.get_buffer_size = InputGetBufferSize;
+    input->stream.common.get_channels = InputGetChannels;
+    input->stream.common.get_format = InputGetFormat;
+    input->stream.common.set_format = InputSetFormat;
+    input->stream.common.get_device = InputGetDevice;
+    input->stream.common.standby = InputStandby;
+    input->stream.common.dump = InputDump;
+    input->stream.common.set_parameters = InputSetParameters;
+    input->stream.common.get_parameters = InputGetParameters;
+    input->stream.common.add_audio_effect = InputAddAudioEffect;
+    input->stream.common.remove_audio_effect = InputRemoveAudioEffect;
+    input->stream.set_gain = InputSetGain;
+    input->stream.read = InputRead;
+    input->stream.get_input_frames_lost = InputGetFramesLost;
+    input->stream.get_capture_position = InputGetCapturePosition;
+    floralDevice->input = input.release();
+    *streamIn = &floralDevice->input->stream;
+    ALOGI("opened 48000 Hz mono PCM input from FloralDevice FMQ");
+    return 0;
 }
 
 void DeviceCloseInputStream(audio_hw_device* device, audio_stream_in* stream) {
-    (void)device;
-    (void)stream;
+    auto* floralDevice = reinterpret_cast<FloralAudioDevice*>(device);
+    std::unique_ptr<FloralStreamIn> input;
+    {
+        std::lock_guard lock(floralDevice->mutex);
+        if (floralDevice->input == nullptr || &floralDevice->input->stream != stream) {
+            return;
+        }
+        input.reset(floralDevice->input);
+        floralDevice->input = nullptr;
+    }
 }
 
 int DeviceDump(const audio_hw_device* device, int fd) {
@@ -493,9 +684,13 @@ int DeviceDump(const audio_hw_device* device, int fd) {
     std::lock_guard lock(floralDevice->mutex);
     if (floralDevice->output == nullptr) {
         dprintf(fd, "Floral primary audio: output closed\n");
-        return 0;
+    } else {
+        OutputDump(&floralDevice->output->stream.common, fd);
     }
-    return OutputDump(&floralDevice->output->stream.common, fd);
+    if (floralDevice->input != nullptr) {
+        InputDump(&floralDevice->input->stream.common, fd);
+    }
+    return 0;
 }
 
 int CloseDevice(hw_device_t* device) {
@@ -506,6 +701,11 @@ int CloseDevice(hw_device_t* device) {
             ALOGW("closing audio device with an open output stream");
             delete floralDevice->output;
             floralDevice->output = nullptr;
+        }
+        if (floralDevice->input != nullptr) {
+            ALOGW("closing audio device with an open input stream");
+            delete floralDevice->input;
+            floralDevice->input = nullptr;
         }
     }
     delete floralDevice;

@@ -1,4 +1,4 @@
-# Floral primary audio output HAL.
+# Floral primary speaker and microphone HAL.
 REDROID_USE_FLORAL_AUDIO := true
 
 PRODUCT_PACKAGES += \

@@ -6,8 +6,10 @@ cc_library_static {
     name: "libfloral_audio_core",
     vendor_available: true,
     srcs: [
+        "src/AudioInputBuffer.cpp",
         "src/AudioPacketQueue.cpp",
         "src/AudioPcmPublisher.cpp",
+        "src/AudioPcmReceiver.cpp",
     ],
     export_include_dirs: ["include"],
     whole_static_libs: ["libfloral_device_audio_pcm"],
@@ -60,7 +62,11 @@ cc_test {
     vendor: true,
     srcs: [
         "tests/AudioPacketQueueTest.cpp",
+        "tests/AudioInputBufferTest.cpp",
+        "tests/AudioHalInputTest.cpp",
+        "src/AudioHal.cpp",
     ],
+    header_libs: ["libhardware_headers"],
     static_libs: ["libfloral_audio_core"],
     shared_libs: [
         "android.hardware.common-V2-ndk_platform",
